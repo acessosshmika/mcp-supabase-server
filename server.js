@@ -16,8 +16,6 @@ const supabaseKey = process.env.SUPABASE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
   console.error("❌ Erro: Faltam credenciais no .env");
-  console.error("   SUPABASE_URL:", supabaseUrl ? "✓" : "✗");
-  console.error("   SUPABASE_KEY:", supabaseKey ? "✓" : "✗");
   process.exit(1);
 }
 
@@ -31,7 +29,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 80;
 
-// CORS configurado para n8n
+// CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
@@ -85,7 +83,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "listar_tabelas",
-        description: "Lista todas as tabelas disponíveis no Supabase",
+        description: "Lista informações sobre as tabelas do Supabase",
         inputSchema: {
           type: "object",
           properties: {}
@@ -104,7 +102,6 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === "buscar_arsenal") {
       const searchTerm = args.busca || "";
       
-      // Buscar na tabela arsenal
       const { data, error } = await supabase
         .from('arsenal')
         .select('*')
@@ -128,14 +125,13 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     
     if (name === "listar_tabelas") {
-      // Buscar informações do schema
       const { data, error } = await supabase
-        .from('information_schema.tables')
-        .select('table_name')
-        .eq('table_schema', 'public');
+        .from('arsenal')
+        .select('*')
+        .limit(1);
       
       if (error) {
-        throw new Error(`Erro ao listar tabelas: ${error.message}`);
+        throw new Error(`Erro ao acessar tabela: ${error.message}`);
       }
       
       return {
@@ -143,7 +139,8 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: "text",
           text: JSON.stringify({
             sucesso: true,
-            tabelas: data
+            mensagem: "Tabela 'arsenal' acessível",
+            exemplo: data
           }, null, 2)
         }]
       };
@@ -166,60 +163,60 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Armazenar transportes ativos
-const activeTransports = new Map();
+// Armazenar transporte ativo (apenas um por vez, conforme documentação oficial)
+let activeTransport = null;
 
-// Endpoint SSE (Server-Sent Events)
+// Endpoint SSE - Seguindo a documentação oficial do MCP SDK
 app.get('/sse', async (req, res) => {
   console.log("🔗 Nova conexão SSE recebida!");
   
   try {
-    // Criar novo transporte SSE
-    const transport = new SSEServerTransport('/messages', res);
+    // Criar transporte SSE passando apenas o endpoint e o response
+    // Documentação: https://modelcontextprotocol.io/docs/concepts/transports
+    activeTransport = new SSEServerTransport('/messages', res);
     
-    // Conectar servidor MCP ao transporte
-    await mcpServer.connect(transport);
+    console.log(`📦 Transporte SSE criado`);
     
-    // Gerar ID único
-    const connectionId = `conn_${Date.now()}`;
-    activeTransports.set(connectionId, transport);
+    // Conectar servidor ao transporte
+    // IMPORTANTE: connect() chama start() internamente
+    await mcpServer.connect(activeTransport);
     
-    console.log(`✅ Transporte SSE criado: ${connectionId}`);
-    console.log(`📊 Conexões ativas: ${activeTransports.size}`);
+    console.log(`✅ Conexão SSE estabelecida com sucesso!`);
     
     // Limpar quando a conexão fechar
-    req.on('close', () => {
-      console.log(`🔌 Conexão fechada: ${connectionId}`);
-      activeTransports.delete(connectionId);
-      console.log(`📊 Conexões restantes: ${activeTransports.size}`);
+    res.on('close', () => {
+      console.log(`🔌 Conexão SSE fechada`);
+      activeTransport = null;
     });
     
-    req.on('error', (error) => {
-      console.error(`❌ Erro na conexão ${connectionId}:`, error);
-      activeTransports.delete(connectionId);
+    res.on('error', (error) => {
+      console.error(`❌ Erro na conexão SSE:`, error);
+      activeTransport = null;
     });
     
   } catch (error) {
     console.error("❌ Erro ao criar transporte SSE:", error);
+    console.error("Stack trace:", error.stack);
+    
     if (!res.headersSent) {
       res.status(500).json({ 
         error: "Falha ao estabelecer conexão SSE",
-        details: error.message 
+        details: error.message,
+        stack: error.stack
       });
     }
   }
 });
 
 // Endpoint para receber mensagens
+// Bug conhecido do SDK: precisa passar req.body explicitamente
+// Referência: https://github.com/modelcontextprotocol/typescript-sdk/issues/187
 app.post('/messages', async (req, res) => {
   console.log("📨 Mensagem POST recebida");
   console.log("Body:", JSON.stringify(req.body, null, 2));
   
   try {
-    // Pegar primeiro transporte ativo
-    const transports = Array.from(activeTransports.values());
-    
-    if (transports.length === 0) {
+    if (!activeTransport) {
       console.warn("⚠️ Nenhuma conexão SSE ativa");
       return res.status(400).json({ 
         error: "Nenhuma conexão SSE ativa",
@@ -227,18 +224,21 @@ app.post('/messages', async (req, res) => {
       });
     }
     
-    const transport = transports[0];
-    console.log(`✅ Usando transporte ativo (${transports.length} disponível(is))`);
+    console.log(`✅ Processando mensagem com transporte ativo`);
     
-    // Processar mensagem através do transporte
-    await transport.handlePostMessage(req, res);
+    // CORREÇÃO CRÍTICA: Passar req.body como terceiro parâmetro
+    // Isso contorna um bug conhecido no SDK
+    await activeTransport.handlePostMessage(req, res, req.body);
     
   } catch (error) {
     console.error("❌ Erro ao processar mensagem:", error);
+    console.error("Stack trace:", error.stack);
+    
     if (!res.headersSent) {
       res.status(500).json({ 
         error: "Erro ao processar mensagem",
-        details: error.message 
+        details: error.message,
+        stack: error.stack
       });
     }
   }
@@ -250,7 +250,7 @@ app.get('/health', (req, res) => {
     status: 'online',
     servidor: 'MCP Supabase Server',
     versao: '2.0.0',
-    conexoes_ativas: activeTransports.size,
+    conexao_ativa: activeTransport !== null,
     timestamp: new Date().toISOString(),
     supabase_url: supabaseUrl
   });
@@ -261,10 +261,12 @@ app.get('/', (req, res) => {
   res.json({
     mensagem: "Servidor MCP Supabase",
     endpoints: {
-      sse: '/sse (GET)',
-      messages: '/messages (POST)',
-      health: '/health (GET)'
-    }
+      sse: '/sse (GET) - Estabelece conexão Server-Sent Events',
+      messages: '/messages (POST) - Envia mensagens ao servidor MCP',
+      health: '/health (GET) - Verifica status do servidor'
+    },
+    status: 'rodando',
+    conexao_ativa: activeTransport !== null
   });
 });
 
@@ -284,6 +286,7 @@ app.listen(PORT, () => {
 // Tratamento de erros não capturados
 process.on('uncaughtException', (error) => {
   console.error('❌ Erro não capturado:', error);
+  console.error('Stack:', error.stack);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
