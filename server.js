@@ -20,12 +20,11 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 const app = express();
-app.use(express.json()); // ✅ Necessário para interpretar JSON no POST
+app.use(express.json());
 
-// O Easypanel injeta a porta, ou usa 80 como definiste
 const PORT = process.env.PORT || 80;
 
-// 1. CORREÇÃO CORS: Permite que o n8n fale com o servidor
+// CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "*");
@@ -37,7 +36,7 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-// Lista de ferramentas disponíveis
+// Lista de ferramentas
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [{
@@ -54,9 +53,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 // Lógica da ferramenta
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  const { name } = request.params;
   if (name === "buscar_arsenal") {
-    // Aqui você pode usar o Supabase para buscar dados
     return { content: [{ type: "text", text: "Teste de conexão bem sucedido!" }] };
   }
   throw new Error("Ferramenta não encontrada");
@@ -67,8 +65,12 @@ let transport;
 // Endpoint SSE
 app.get('/sse', async (req, res) => {
   console.log("🔗 Nova conexão SSE recebida do n8n!");
+  // NÃO usar res.writeHead aqui
   transport = new SSEServerTransport('/messages', res);
-  await server.connect(transport);
+  // O SDK cuida dos cabeçalhos
+  server.connect(transport).catch(err => {
+    console.error("Erro ao conectar SSE:", err);
+  });
 });
 
 // Endpoint para mensagens
