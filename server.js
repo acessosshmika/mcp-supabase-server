@@ -80,7 +80,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
           type: "object",
           properties: { 
             busca: { 
-              type: "string",
+              type: "string", 
               description: "Termo de busca para encontrar registros"
             } 
           },
@@ -110,7 +110,7 @@ handlers.listTools = async () => {
           type: "object",
           properties: { 
             busca: { 
-              type: "string",
+              type: "string", 
               description: "Termo de busca para encontrar registros"
             } 
           },
@@ -129,88 +129,38 @@ handlers.listTools = async () => {
   };
 };
 
-// Registrar handler para executar ferramentas
+// Registrar handler para executar ferramentas (Implementação Padrão MCP SDK)
 mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  console.log(`🔧 Executando ferramenta: ${name}`, args);
+  console.log(`🔧 Executando ferramenta (SDK): ${name}`, args);
   
-  try {
-    if (name === "buscar_arsenal") {
-      const searchTerm = args.busca || "";
-      
-      const { data, error } = await supabase
-        .from('arsenal')
-        .select('*')
-        .ilike('nome', `%${searchTerm}%`)
-        .limit(10);
-      
-      if (error) {
-        throw new Error(`Erro no Supabase: ${error.message}`);
-      }
-      
-      return { 
-        content: [{ 
-          type: "text", 
-          text: JSON.stringify({
-            sucesso: true,
-            total: data.length,
-            resultados: data
-          }, null, 2)
-        }] 
-      };
-    }
-    
-    if (name === "listar_tabelas") {
-      const { data, error } = await supabase
-        .from('arsenal')
-        .select('*')
-        .limit(1);
-      
-      if (error) {
-        throw new Error(`Erro ao acessar tabela: ${error.message}`);
-      }
-      
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            sucesso: true,
-            mensagem: "Tabela 'arsenal' acessível",
-            exemplo: data
-          }, null, 2)
-        }]
-      };
-    }
-    
-    throw new Error(`Ferramenta desconhecida: ${name}`);
-    
-  } catch (error) {
-    console.error(`❌ Erro ao executar ${name}:`, error);
-    return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          sucesso: false,
-          erro: error.message
-        }, null, 2)
-      }],
-      isError: true
-    };
+  // Reutiliza a lógica centralizada para garantir consistência
+  const toolResult = await handlers.callTool(name, args);
+  
+  // Se retornou erro flagado, lança exceção para o SDK capturar se necessário,
+  // ou retorna o conteúdo de erro formatado
+  if (toolResult.isError) {
+      // O SDK espera uma resposta com content, mesmo em erro, ou um throw.
+      // Aqui mantemos o retorno estruturado.
+      return { content: toolResult.content, isError: true };
   }
+  
+  return { content: toolResult.content };
 });
 
-// Armazenar referência ao handler
+// Lógica centralizada das ferramentas (CORRIGIDA)
 handlers.callTool = async (name, args) => {
-  console.log(`🔧 Executando ferramenta: ${name}`, args);
+  console.log(`🔧 Executando ferramenta (Lógica Central): ${name}`, args);
   
   try {
     if (name === "buscar_arsenal") {
       const searchTerm = args?.busca || "";
       
+      // CORREÇÃO: Tabela alterada de 'arsenal' para 'arsenal_vendas'
       const { data, error } = await supabase
-        .from('arsenal')
+        .from('arsenal_vendas') 
         .select('*')
-        .ilike('nome', `%${searchTerm}%`)
+        .ilike('nome_arquivo', `%${searchTerm}%`) // Ajustei para buscar pelo nome do arquivo ou outro campo texto relevante
         .limit(10);
       
       if (error) {
@@ -230,8 +180,9 @@ handlers.callTool = async (name, args) => {
     }
     
     if (name === "listar_tabelas") {
+      // CORREÇÃO: Tabela alterada de 'arsenal' para 'arsenal_vendas'
       const { data, error } = await supabase
-        .from('arsenal')
+        .from('arsenal_vendas')
         .select('*')
         .limit(1);
       
@@ -244,7 +195,7 @@ handlers.callTool = async (name, args) => {
           type: "text",
           text: JSON.stringify({
             sucesso: true,
-            mensagem: "Tabela 'arsenal' acessível",
+            mensagem: "Tabela 'arsenal_vendas' acessível",
             exemplo: data
           }, null, 2)
         }]
@@ -269,17 +220,12 @@ handlers.callTool = async (name, args) => {
 };
 
 // SOLUÇÃO: Implementação manual do Streamable HTTP
-// O SSE Transport foi deprecado, então implementamos manualmente
-// Referência: https://modelcontextprotocol.io/docs/concepts/transports
-
 // Armazenar sessões ativas
 const sessions = new Map();
 
 // Endpoint principal MCP (Streamable HTTP)
 app.post('/sse', async (req, res) => {
   console.log("🔗 Requisição MCP recebida");
-  console.log("Headers:", req.headers);
-  console.log("Body:", JSON.stringify(req.body, null, 2));
   
   try {
     const sessionId = req.headers['mcp-session-id'] || `session_${Date.now()}`;
@@ -299,11 +245,9 @@ app.post('/sse', async (req, res) => {
     const request = req.body;
     console.log(`📨 Método: ${request.method}, ID: ${request.id}`);
     
-    // Processar a requisição através do servidor MCP
     let response;
     
     if (request.method === 'initialize') {
-      // Responder com capacidades do servidor
       response = {
         jsonrpc: "2.0",
         id: request.id,
@@ -320,18 +264,12 @@ app.post('/sse', async (req, res) => {
       };
       sessions.set(sessionId, { initialized: true });
       res.setHeader('Mcp-Session-Id', sessionId);
-      console.log(`✅ Sessão inicializada: ${sessionId}`);
       
     } else if (request.method === 'notifications/initialized') {
-      // Confirmação de inicialização do cliente
-      console.log(`✅ Cliente confirmou inicialização`);
-      response = null; // Notificações não precisam de resposta
+      response = null;
       
     } else if (request.method === 'tools/list') {
-      // Listar ferramentas - usar handler direto
-      console.log(`📋 Listando ferramentas`);
       const toolsResult = await handlers.listTools();
-      
       response = {
         jsonrpc: "2.0",
         id: request.id,
@@ -339,10 +277,8 @@ app.post('/sse', async (req, res) => {
       };
       
     } else if (request.method === 'tools/call') {
-      // Executar ferramenta - usar handler direto
       const toolName = request.params?.name;
       const toolArgs = request.params?.arguments || {};
-      console.log(`🔧 Chamando ferramenta: ${toolName}`, toolArgs);
       
       const toolResult = await handlers.callTool(toolName, toolArgs);
       
@@ -353,7 +289,6 @@ app.post('/sse', async (req, res) => {
       };
       
     } else if (request.method === 'ping') {
-      // Responder a ping
       response = {
         jsonrpc: "2.0",
         id: request.id,
@@ -361,8 +296,6 @@ app.post('/sse', async (req, res) => {
       };
       
     } else {
-      // Método não suportado
-      console.warn(`⚠️ Método não suportado: ${request.method}`);
       response = {
         jsonrpc: "2.0",
         id: request.id,
@@ -373,21 +306,15 @@ app.post('/sse', async (req, res) => {
       };
     }
     
-    // Se não há resposta (notificação), retornar 204
     if (response === null) {
       return res.status(204).send();
     }
     
-    console.log("✅ Resposta:", JSON.stringify(response, null, 2));
-    
-    // Enviar resposta JSON
     res.setHeader('Content-Type', 'application/json');
     res.json(response);
     
   } catch (error) {
     console.error("❌ Erro ao processar requisição MCP:", error);
-    console.error("Stack:", error.stack);
-    
     res.status(500).json({
       jsonrpc: "2.0",
       id: req.body?.id || null,
@@ -402,23 +329,9 @@ app.post('/sse', async (req, res) => {
 
 // Endpoint compatível com n8n (fallback)
 app.get('/sse', (req, res) => {
-  console.log("ℹ️ Requisição GET recebida em /sse");
   res.json({
     mensagem: "Este é um servidor MCP via Streamable HTTP",
-    instruções: "Use POST /sse com corpo JSON-RPC 2.0",
-    exemplo: {
-      jsonrpc: "2.0",
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: {
-          name: "n8n-client",
-          version: "1.0.0"
-        }
-      },
-      id: 1
-    }
+    instruções: "Use POST /sse com corpo JSON-RPC 2.0"
   });
 });
 
@@ -428,10 +341,8 @@ app.get('/health', (req, res) => {
     status: 'online',
     servidor: 'MCP Supabase Server (Streamable HTTP)',
     versao: '2.0.0',
-    sessoes_ativas: sessions.size,
-    timestamp: new Date().toISOString(),
-    supabase_url: supabaseUrl,
-    transporte: 'Streamable HTTP (padrão moderno)'
+    tabela_alvo: 'arsenal_vendas',
+    sessoes_ativas: sessions.size
   });
 });
 
@@ -439,13 +350,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     mensagem: "Servidor MCP Supabase com Streamable HTTP",
-    endpoints: {
-      mcp: 'POST /sse - Endpoint principal MCP (JSON-RPC 2.0)',
-      health: 'GET /health - Verifica status do servidor'
-    },
-    status: 'rodando',
-    transporte: 'Streamable HTTP',
-    nota: 'SSE Transport foi deprecado em favor do Streamable HTTP'
+    status: 'rodando'
   });
 });
 
@@ -456,18 +361,6 @@ app.listen(PORT, () => {
   console.log("=".repeat(60));
   console.log(`🌐 Porta: ${PORT}`);
   console.log(`📍 Endpoint MCP: POST http://localhost:${PORT}/sse`);
-  console.log(`📍 Health Check: http://localhost:${PORT}/health`);
-  console.log(`🗄️  Supabase URL: ${supabaseUrl}`);
-  console.log(`🔄 Transporte: Streamable HTTP (moderno)`);
+  console.log(`🗄️  Supabase Tabela: arsenal_vendas`);
   console.log("=".repeat(60) + "\n");
-});
-
-// Tratamento de erros não capturados
-process.on('uncaughtException', (error) => {
-  console.error('❌ Erro não capturado:', error);
-  console.error('Stack:', error.stack);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Promise rejeitada não tratada:', reason);
 });
