@@ -82,4 +82,4 @@ app.post('/messages', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Servidor a correr na porta ${PORT}`);
-});
+}); 
