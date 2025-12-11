@@ -27,7 +27,7 @@ const PORT = process.env.PORT || 3000;
 
 // Configurar servidor MCP
 const server = new Server(
-  { name: 'supabase-mcp-server', version: '1.0.0' },
+  { name: 'supabase-mcp-server', version: '2.0.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -36,44 +36,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
+        name: "buscar_arsenal",
+        description: "Busca imagens de produtos e provas sociais no banco de dados Arsenal. Use para encontrar fotos baseadas em contexto (ex: 'relógio para ciclismo', 'uso executivo', 'segurança').",
+        inputSchema: {
+          type: "object",
+          properties: {
+            busca: { type: "string", description: "Termo de busca (ex: 'ciclismo', 'T20', 'segurança')" },
+            categoria: { type: "string", description: "Filtro opcional de categoria (ex: 'ETAPA_3_SOLUCAO')" }
+          },
+          required: ["busca"],
+        },
+      },
+      // Mantivemos estas ferramentas úteis caso precises
+      {
         name: "ler_tabela",
-        description: "Lê dados da tabela.",
+        description: "Lê dados brutos de qualquer tabela.",
         inputSchema: {
           type: "object",
           properties: {
             tabela: { type: "string" },
-            colunas: { type: "string" },
             limite: { type: "number" }
           },
           required: ["tabela"],
         },
-      },
-      {
-        name: "modificar_dados",
-        description: "CRUD: insert, update, delete.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            acao: { type: "string", enum: ["insert", "update", "delete"] },
-            tabela: { type: "string" },
-            dados: { type: "object" },
-            id_alvo: { type: "string" }
-          },
-          required: ["acao", "tabela"],
-        },
-      },
-      {
-        name: "gerar_link_download",
-        description: "Link temporário do Storage.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            bucket: { type: "string" },
-            caminho: { type: "string" },
-          },
-          required: ["bucket", "caminho"],
-        },
-      },
+      }
     ],
   };
 });
@@ -84,33 +70,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   console.log(`🔨 A usar ferramenta: ${name}`);
 
   try {
+    // --- NOVA LÓGICA: BUSCA INTELIGENTE NO ARSENAL ---
+    if (name === "buscar_arsenal") {
+      const termo = args.busca;
+      
+      // Iniciamos a query na tabela 'arsenal'
+      // IMPORTANTE: Não trazemos o 'embedding' para não pesar na resposta
+      let query = supabase
+        .from('arsenal')
+        .select('link_publico, descricao_semantica, modelo_associado, emocao_predominante, detalhes_visuais')
+        .limit(5); // Trazemos apenas as 5 melhores para não confundir o agente
+
+      // Se houver termo de busca, procuramos em várias colunas de texto (ILIKE é case-insensitive)
+      if (termo) {
+        // A sintaxe .or() permite procurar "termo" NA descrição OU no modelo OU na emoção
+        const filtro = `descricao_semantica.ilike.%${termo}%,modelo_associado.ilike.%${termo}%,emocao_predominante.ilike.%${termo}%,detalhes_visuais.ilike.%${termo}%`;
+        query = query.or(filtro);
+      }
+
+      if (args.categoria) {
+        query = query.eq('categoria', args.categoria);
+      }
+
+      const { data, error } = await query;
+
+      if (error) throw error;
+      if (!data || data.length === 0) {
+        return { content: [{ type: "text", text: "Não encontrei imagens no arsenal com esses termos." }] };
+      }
+
+      // Formatamos a resposta para o Agente entender bem o que encontrou
+      const resultadoFormatado = data.map(item => {
+        return `📸 Imagem (${item.modelo_associado}):
+Contexto: ${item.descricao_semantica}
+Emoção: ${item.emocao_predominante}
+Link: ${item.link_publico}
+---`;
+      }).join("\n");
+
+      return { content: [{ type: "text", text: resultadoFormatado }] };
+    }
+    // --------------------------------------------------
+
     if (name === "ler_tabela") {
       const { data, error } = await supabase
         .from(args.tabela)
-        .select(args.colunas || "*")
-        .limit(args.limite || 10);
+        .select("*")
+        .limit(args.limite || 5);
       if (error) throw error;
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     }
 
-    if (name === "modificar_dados") {
-      let result;
-      if (args.acao === "insert") result = await supabase.from(args.tabela).insert(args.dados).select();
-      else if (args.acao === "update") result = await supabase.from(args.tabela).update(args.dados).eq('id', args.id_alvo).select();
-      else if (args.acao === "delete") result = await supabase.from(args.tabela).delete().eq('id', args.id_alvo).select();
-      
-      if (result.error) throw result.error;
-      return { content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }] };
-    }
-
-    if (name === "gerar_link_download") {
-      const { data, error } = await supabase.storage.from(args.bucket).createSignedUrl(args.caminho, 3600);
-      if (error) throw error;
-      return { content: [{ type: "text", text: `Link: ${data.signedUrl}` }] };
-    }
-
     throw new Error("Ferramenta desconhecida");
   } catch (error) {
+    console.error(error);
     return { content: [{ type: "text", text: `Erro: ${error.message}` }], isError: true };
   }
 });
@@ -118,14 +131,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // 5. Ligar o Servidor Web (SSE)
 let transport;
 
-// Rota para iniciar a conexão SSE (o cliente chama isto)
 app.get('/sse', async (req, res) => {
   console.log("🔗 Nova conexão SSE recebida!");
   transport = new SSEServerTransport('/messages', res);
   await server.connect(transport);
 });
 
-// Rota para o cliente enviar mensagens para cá
 app.post('/messages', async (req, res) => {
   if (transport) {
     await transport.handlePostMessage(req, res);
@@ -134,10 +145,9 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-// Rota de SAÚDE (Isto é o que deixa a luz VERDE 🟢)
 app.get('/', (req, res) => res.send('OK'));
 app.get('/health', (req, res) => res.send('OK'));
 
 app.listen(PORT, () => {
-  console.log(`✅ Servidor Web MCP a correr na porta ${PORT}`);
+  console.log(`✅ Servidor Arsenal MCP a correr na porta ${PORT}`);
 });
