@@ -66,8 +66,8 @@ let transport;
 app.get('/sse', async (req, res) => {
   console.log("🔗 Nova conexão SSE recebida do n8n!");
   transport = new SSEServerTransport('/messages');
-  await transport.handleRequest(req, res); // ✅ inicia corretamente o stream
-  await server.connect(transport);         // ✅ conecta o MCP ao transporte
+  await transport.handleRequest(req, res); // inicia o stream SSE
+  await server.connect(transport);         // conecta o MCP ao transporte
 });
 
 // Endpoint para mensagens
