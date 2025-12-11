@@ -1,5 +1,6 @@
+import express from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -7,43 +8,41 @@ import {
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 
-// 1. Configuração Inicial e Verificação
+// 1. Configurações
 dotenv.config();
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error("❌ Erro: Faltam as credenciais (URL ou KEY) no ficheiro .env");
+  console.error("❌ Erro: Faltam credenciais no .env");
   process.exit(1);
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// 2. Criar a Aplicação Web (Express)
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Configurar servidor MCP
 const server = new Server(
-  {
-    name: 'supabase-mcp-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
+  { name: 'supabase-mcp-server', version: '1.0.0' },
+  { capabilities: { tools: {} } }
 );
 
-// 2. Definir o "Menu" de Ferramentas (Usando o Schema correto para evitar o erro)
+// 3. Ferramentas (O Menu)
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
         name: "ler_tabela",
-        description: "Lê dados de uma tabela. Use para consultar informações.",
+        description: "Lê dados da tabela.",
         inputSchema: {
           type: "object",
           properties: {
             tabela: { type: "string" },
-            colunas: { type: "string", description: "Ex: '*' ou 'id, nome'" },
+            colunas: { type: "string" },
             limite: { type: "number" }
           },
           required: ["tabela"],
@@ -51,26 +50,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "modificar_dados",
-        description: "Insere, atualiza ou apaga dados na base de dados.",
+        description: "CRUD: insert, update, delete.",
         inputSchema: {
           type: "object",
           properties: {
-            acao: { type: "string", enum: ["insert", "update", "delete"], description: "Ação a realizar" },
+            acao: { type: "string", enum: ["insert", "update", "delete"] },
             tabela: { type: "string" },
-            dados: { type: "object", description: "Dados JSON para inserir/atualizar" },
-            id_alvo: { type: "string", description: "ID da linha (obrigatório para update/delete)" }
+            dados: { type: "object" },
+            id_alvo: { type: "string" }
           },
           required: ["acao", "tabela"],
         },
       },
       {
         name: "gerar_link_download",
-        description: "Gera link para baixar ficheiros do Storage.",
+        description: "Link temporário do Storage.",
         inputSchema: {
           type: "object",
           properties: {
-            bucket: { type: "string", description: "Nome do bucket de arquivos" },
-            caminho: { type: "string", description: "Caminho do arquivo dentro do bucket" },
+            bucket: { type: "string" },
+            caminho: { type: "string" },
           },
           required: ["bucket", "caminho"],
         },
@@ -79,70 +78,66 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   };
 });
 
-// 3. Executar as Ferramentas (A Lógica)
+// 4. Lógica das Ferramentas
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  console.log(`🔨 A usar ferramenta: ${name}`);
 
   try {
-    // --- FERRAMENTA 1: LER DADOS ---
     if (name === "ler_tabela") {
       const { data, error } = await supabase
         .from(args.tabela)
         .select(args.colunas || "*")
         .limit(args.limite || 10);
-      
-      if (error) throw new Error(error.message);
+      if (error) throw error;
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     }
 
-    // --- FERRAMENTA 2: MODIFICAR DADOS (CRUD) ---
     if (name === "modificar_dados") {
       let result;
+      if (args.acao === "insert") result = await supabase.from(args.tabela).insert(args.dados).select();
+      else if (args.acao === "update") result = await supabase.from(args.tabela).update(args.dados).eq('id', args.id_alvo).select();
+      else if (args.acao === "delete") result = await supabase.from(args.tabela).delete().eq('id', args.id_alvo).select();
       
-      if (args.acao === "insert") {
-        result = await supabase.from(args.tabela).insert(args.dados).select();
-      } 
-      else if (args.acao === "update") {
-        if (!args.id_alvo) throw new Error("Precisa de id_alvo para atualizar");
-        result = await supabase.from(args.tabela).update(args.dados).eq('id', args.id_alvo).select();
-      } 
-      else if (args.acao === "delete") {
-        if (!args.id_alvo) throw new Error("Precisa de id_alvo para apagar");
-        result = await supabase.from(args.tabela).delete().eq('id', args.id_alvo).select();
-      }
-
-      if (result.error) throw new Error(result.error.message);
+      if (result.error) throw result.error;
       return { content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }] };
     }
 
-    // --- FERRAMENTA 3: DOWNLOAD ---
     if (name === "gerar_link_download") {
-      const { data, error } = await supabase.storage
-        .from(args.bucket)
-        .createSignedUrl(args.caminho, 3600); // Link válido por 1 hora
-      
-      if (error) throw new Error(error.message);
-      return { content: [{ type: "text", text: `Link de download: ${data.signedUrl}` }] };
+      const { data, error } = await supabase.storage.from(args.bucket).createSignedUrl(args.caminho, 3600);
+      if (error) throw error;
+      return { content: [{ type: "text", text: `Link: ${data.signedUrl}` }] };
     }
 
-    throw new Error(`Ferramenta não encontrada: ${name}`);
-
+    throw new Error("Ferramenta desconhecida");
   } catch (error) {
-    return {
-      content: [{ type: "text", text: `Erro: ${error.message}` }],
-      isError: true,
-    };
+    return { content: [{ type: "text", text: `Erro: ${error.message}` }], isError: true };
   }
 });
 
-// 4. Iniciar o Servidor
-async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("✅ Servidor Supabase MCP a correr e pronto!");
-}
+// 5. Ligar o Servidor Web (SSE)
+let transport;
 
-runServer().catch((error) => {
-  console.error("Erro fatal no servidor:", error);
-  process.exit(1);
+// Rota para iniciar a conexão SSE (o cliente chama isto)
+app.get('/sse', async (req, res) => {
+  console.log("🔗 Nova conexão SSE recebida!");
+  transport = new SSEServerTransport('/messages', res);
+  await server.connect(transport);
+});
+
+// Rota para o cliente enviar mensagens para cá
+app.post('/messages', async (req, res) => {
+  if (transport) {
+    await transport.handlePostMessage(req, res);
+  } else {
+    res.status(404).send("Sessão não iniciada");
+  }
+});
+
+// Rota de SAÚDE (Isto é o que deixa a luz VERDE 🟢)
+app.get('/', (req, res) => res.send('OK'));
+app.get('/health', (req, res) => res.send('OK'));
+
+app.listen(PORT, () => {
+  console.log(`✅ Servidor Web MCP a correr na porta ${PORT}`);
 });
