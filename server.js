@@ -65,8 +65,9 @@ let transport;
 // Endpoint SSE
 app.get('/sse', async (req, res) => {
   console.log("🔗 Nova conexão SSE recebida do n8n!");
-  transport = new SSEServerTransport('/messages', res);
-  await server.connect(transport); // ✅ só isso já inicia o stream SSE
+  transport = new SSEServerTransport('/messages'); // ✅ não passar res aqui
+  await server.connect(transport);
+  transport.start(req, res); // ✅ inicia o stream SSE corretamente
 });
 
 // Endpoint para mensagens
