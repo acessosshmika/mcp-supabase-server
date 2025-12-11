@@ -65,12 +65,9 @@ let transport;
 // Endpoint SSE
 app.get('/sse', async (req, res) => {
   console.log("🔗 Nova conexão SSE recebida do n8n!");
-  // NÃO usar res.writeHead aqui
-  transport = new SSEServerTransport('/messages', res);
-  // O SDK cuida dos cabeçalhos
-  server.connect(transport).catch(err => {
-    console.error("Erro ao conectar SSE:", err);
-  });
+  transport = new SSEServerTransport('/messages');
+  await transport.handleRequest(req, res); // ✅ inicia corretamente o stream
+  await server.connect(transport);         // ✅ conecta o MCP ao transporte
 });
 
 // Endpoint para mensagens
