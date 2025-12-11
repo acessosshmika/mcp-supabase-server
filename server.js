@@ -1,14 +1,24 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 
+// 1. Configuração Inicial
 dotenv.config();
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
-);
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error("❌ Erro: Faltam as credenciais no ficheiro .env");
+  process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 const server = new Server(
   {
@@ -22,178 +32,114 @@ const server = new Server(
   }
 );
 
-server.setRequestHandler('tools/list', async () => {
+// 2. Definir as Ferramentas Disponíveis (O "Menu")
+server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: 'query_table',
-        description: 'Consultar dados de uma tabela do Supabase',
+        name: "ler_tabela",
+        description: "Lê dados de uma tabela. Use para consultar informações.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            table: { type: 'string', description: 'Nome da tabela' },
-            select: { type: 'string', description: 'Colunas (padrão: *)', default: '*' },
-            filters: { type: 'object', description: 'Filtros Ex: {id: 1}' },
-            limit: { type: 'number', description: 'Limite de resultados', default: 100 },
-            orderBy: { type: 'string', description: 'Ordenar por coluna' },
-            ascending: { type: 'boolean', description: 'Ordem crescente', default: true }
+            tabela: { type: "string" },
+            colunas: { type: "string", description: "Ex: '*' ou 'id, nome'" },
+            limite: { type: "number" }
           },
-          required: ['table']
-        }
+          required: ["tabela"],
+        },
       },
       {
-        name: 'insert_data',
-        description: 'Inserir dados em uma tabela',
+        name: "modificar_dados",
+        description: "Insere, atualiza ou apaga dados (CRUD).",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            table: { type: 'string', description: 'Nome da tabela' },
-            data: { 
-              description: 'Dados (objeto ou array)',
-              oneOf: [
-                { type: 'object' },
-                { type: 'array', items: { type: 'object' } }
-              ]
-            }
+            acao: { type: "string", enum: ["insert", "update", "delete"] },
+            tabela: { type: "string" },
+            dados: { type: "object", description: "JSON com os dados" },
+            id_alvo: { type: "string", description: "Obrigatório para update/delete" }
           },
-          required: ['table', 'data']
-        }
+          required: ["acao", "tabela"],
+        },
       },
       {
-        name: 'update_data',
-        description: 'Atualizar dados em uma tabela',
+        name: "gerar_link_download",
+        description: "Gera link para baixar ficheiros do Storage.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            table: { type: 'string', description: 'Nome da tabela' },
-            filters: { type: 'object', description: 'Filtros Ex: {id: 1}' },
-            data: { type: 'object', description: 'Novos valores' }
+            bucket: { type: "string" },
+            caminho: { type: "string" },
           },
-          required: ['table', 'filters', 'data']
-        }
+          required: ["bucket", "caminho"],
+        },
       },
-      {
-        name: 'delete_data',
-        description: 'Deletar dados de uma tabela',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            table: { type: 'string', description: 'Nome da tabela' },
-            filters: { type: 'object', description: 'Filtros Ex: {id: 1}' }
-          },
-          required: ['table', 'filters']
-        }
-      }
-    ]
+    ],
   };
 });
 
-server.setRequestHandler('tools/call', async (request) => {
+// 3. Executar as Ferramentas (A Lógica)
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
-    switch (name) {
-      case 'query_table': {
-        let query = supabase.from(args.table).select(args.select || '*');
-        
-        if (args.filters) {
-          Object.entries(args.filters).forEach(([key, value]) => {
-            query = query.eq(key, value);
-          });
-        }
-        
-        if (args.orderBy) {
-          query = query.order(args.orderBy, { ascending: args.ascending !== false });
-        }
-        
-        if (args.limit) {
-          query = query.limit(args.limit);
-        }
-        
-        const { data, error } = await query;
-        if (error) throw error;
-        
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ success: true, count: data.length, data }, null, 2)
-          }]
-        };
-      }
-
-      case 'insert_data': {
-        const { data, error } = await supabase
-          .from(args.table)
-          .insert(args.data)
-          .select();
-        
-        if (error) throw error;
-        
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ success: true, message: 'Inserido com sucesso', data }, null, 2)
-          }]
-        };
-      }
-
-      case 'update_data': {
-        let query = supabase.from(args.table).update(args.data);
-        
-        Object.entries(args.filters).forEach(([key, value]) => {
-          query = query.eq(key, value);
-        });
-        
-        const { data, error } = await query.select();
-        if (error) throw error;
-        
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ success: true, message: 'Atualizado', updated: data.length, data }, null, 2)
-          }]
-        };
-      }
-
-      case 'delete_data': {
-        let query = supabase.from(args.table).delete();
-        
-        Object.entries(args.filters).forEach(([key, value]) => {
-          query = query.eq(key, value);
-        });
-        
-        const { data, error } = await query.select();
-        if (error) throw error;
-        
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ success: true, message: 'Deletado', deleted: data.length, data }, null, 2)
-          }]
-        };
-      }
-
-      default:
-        throw new Error(`Ferramenta desconhecida: ${name}`);
+    // --- LER DADOS ---
+    if (name === "ler_tabela") {
+      const { data, error } = await supabase
+        .from(args.tabela)
+        .select(args.colunas || "*")
+        .limit(args.limite || 10);
+      
+      if (error) throw new Error(error.message);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     }
+
+    // --- MODIFICAR DADOS ---
+    if (name === "modificar_dados") {
+      let result;
+      if (args.acao === "insert") {
+        result = await supabase.from(args.tabela).insert(args.dados).select();
+      } else if (args.acao === "update") {
+        if (!args.id_alvo) throw new Error("Precisa de id_alvo para atualizar");
+        result = await supabase.from(args.tabela).update(args.dados).eq('id', args.id_alvo).select();
+      } else if (args.acao === "delete") {
+        if (!args.id_alvo) throw new Error("Precisa de id_alvo para apagar");
+        result = await supabase.from(args.tabela).delete().eq('id', args.id_alvo).select();
+      }
+
+      if (result.error) throw new Error(result.error.message);
+      return { content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }] };
+    }
+
+    // --- DOWNLOAD ---
+    if (name === "gerar_link_download") {
+      const { data, error } = await supabase.storage
+        .from(args.bucket)
+        .createSignedUrl(args.caminho, 3600);
+      
+      if (error) throw new Error(error.message);
+      return { content: [{ type: "text", text: `Link: ${data.signedUrl}` }] };
+    }
+
+    throw new Error(`Ferramenta não encontrada: ${name}`);
+
   } catch (error) {
     return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({ success: false, error: error.message }, null, 2)
-      }],
-      isError: true
+      content: [{ type: "text", text: `Erro: ${error.message}` }],
+      isError: true,
     };
   }
 });
 
-async function main() {
+// 4. Iniciar o Servidor
+async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('🚀 Servidor MCP Supabase iniciado!');
+  console.error("✅ Servidor Supabase MCP a correr...");
 }
 
-main().catch((error) => {
-  console.error('Erro ao iniciar:', error);
+runServer().catch((error) => {
+  console.error("Erro fatal no servidor:", error);
   process.exit(1);
 });
