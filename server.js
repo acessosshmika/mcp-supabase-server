@@ -20,6 +20,8 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 const app = express();
+app.use(express.json());
+
 // O Easypanel injeta a porta, ou usa 80 como definiste
 const PORT = process.env.PORT || 80;
 
