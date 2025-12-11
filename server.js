@@ -53,8 +53,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 // Lógica da ferramenta
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name } = request.params;
+  const { name, arguments: args } = request.params;
   if (name === "buscar_arsenal") {
+    // Exemplo de resposta de teste
     return { content: [{ type: "text", text: "Teste de conexão bem sucedido!" }] };
   }
   throw new Error("Ferramenta não encontrada");
@@ -65,9 +66,9 @@ let transport;
 // Endpoint SSE
 app.get('/sse', async (req, res) => {
   console.log("🔗 Nova conexão SSE recebida do n8n!");
-  transport = new SSEServerTransport('/messages'); // ✅ não passar res aqui
+  // ✅ Passa o res no construtor, o SDK cuida dos cabeçalhos e do stream
+  transport = new SSEServerTransport('/messages', res);
   await server.connect(transport);
-  transport.start(req, res); // ✅ inicia o stream SSE corretamente
 });
 
 // Endpoint para mensagens
