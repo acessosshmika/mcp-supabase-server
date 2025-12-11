@@ -62,6 +62,12 @@ const mcpServer = new Server(
 
 console.log("✅ Servidor MCP criado");
 
+// Armazenar handlers manualmente para acesso direto
+const handlers = {
+  listTools: null,
+  callTool: null
+};
+
 // Registrar handler para listar ferramentas
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
   console.log("📋 Listando ferramentas disponíveis");
@@ -92,6 +98,36 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
     ]
   };
 });
+
+// Armazenar referência ao handler
+handlers.listTools = async () => {
+  return {
+    tools: [
+      {
+        name: "buscar_arsenal",
+        description: "Busca imagens e dados na tabela Arsenal do Supabase",
+        inputSchema: {
+          type: "object",
+          properties: { 
+            busca: { 
+              type: "string",
+              description: "Termo de busca para encontrar registros"
+            } 
+          },
+          required: ["busca"]
+        }
+      },
+      {
+        name: "listar_tabelas",
+        description: "Lista informações sobre as tabelas do Supabase",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        }
+      }
+    ]
+  };
+};
 
 // Registrar handler para executar ferramentas
 mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -163,6 +199,75 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// Armazenar referência ao handler
+handlers.callTool = async (name, args) => {
+  console.log(`🔧 Executando ferramenta: ${name}`, args);
+  
+  try {
+    if (name === "buscar_arsenal") {
+      const searchTerm = args?.busca || "";
+      
+      const { data, error } = await supabase
+        .from('arsenal')
+        .select('*')
+        .ilike('nome', `%${searchTerm}%`)
+        .limit(10);
+      
+      if (error) {
+        throw new Error(`Erro no Supabase: ${error.message}`);
+      }
+      
+      return { 
+        content: [{ 
+          type: "text", 
+          text: JSON.stringify({
+            sucesso: true,
+            total: data.length,
+            resultados: data
+          }, null, 2)
+        }] 
+      };
+    }
+    
+    if (name === "listar_tabelas") {
+      const { data, error } = await supabase
+        .from('arsenal')
+        .select('*')
+        .limit(1);
+      
+      if (error) {
+        throw new Error(`Erro ao acessar tabela: ${error.message}`);
+      }
+      
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            sucesso: true,
+            mensagem: "Tabela 'arsenal' acessível",
+            exemplo: data
+          }, null, 2)
+        }]
+      };
+    }
+    
+    throw new Error(`Ferramenta desconhecida: ${name}`);
+    
+  } catch (error) {
+    console.error(`❌ Erro ao executar ${name}:`, error);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          sucesso: false,
+          erro: error.message
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+};
+
 // SOLUÇÃO: Implementação manual do Streamable HTTP
 // O SSE Transport foi deprecado, então implementamos manualmente
 // Referência: https://modelcontextprotocol.io/docs/concepts/transports
@@ -215,27 +320,49 @@ app.post('/sse', async (req, res) => {
       };
       sessions.set(sessionId, { initialized: true });
       res.setHeader('Mcp-Session-Id', sessionId);
+      console.log(`✅ Sessão inicializada: ${sessionId}`);
+      
+    } else if (request.method === 'notifications/initialized') {
+      // Confirmação de inicialização do cliente
+      console.log(`✅ Cliente confirmou inicialização`);
+      response = null; // Notificações não precisam de resposta
       
     } else if (request.method === 'tools/list') {
-      // Listar ferramentas
-      const toolsResponse = await mcpServer.request(request, ListToolsRequestSchema);
+      // Listar ferramentas - usar handler direto
+      console.log(`📋 Listando ferramentas`);
+      const toolsResult = await handlers.listTools();
+      
       response = {
         jsonrpc: "2.0",
         id: request.id,
-        result: toolsResponse
+        result: toolsResult
       };
       
     } else if (request.method === 'tools/call') {
-      // Executar ferramenta
-      const toolResponse = await mcpServer.request(request, CallToolRequestSchema);
+      // Executar ferramenta - usar handler direto
+      const toolName = request.params?.name;
+      const toolArgs = request.params?.arguments || {};
+      console.log(`🔧 Chamando ferramenta: ${toolName}`, toolArgs);
+      
+      const toolResult = await handlers.callTool(toolName, toolArgs);
+      
       response = {
         jsonrpc: "2.0",
         id: request.id,
-        result: toolResponse
+        result: toolResult
+      };
+      
+    } else if (request.method === 'ping') {
+      // Responder a ping
+      response = {
+        jsonrpc: "2.0",
+        id: request.id,
+        result: {}
       };
       
     } else {
       // Método não suportado
+      console.warn(`⚠️ Método não suportado: ${request.method}`);
       response = {
         jsonrpc: "2.0",
         id: request.id,
@@ -244,6 +371,11 @@ app.post('/sse', async (req, res) => {
           message: `Method not found: ${request.method}`
         }
       };
+    }
+    
+    // Se não há resposta (notificação), retornar 204
+    if (response === null) {
+      return res.status(204).send();
     }
     
     console.log("✅ Resposta:", JSON.stringify(response, null, 2));
