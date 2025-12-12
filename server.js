@@ -16,7 +16,6 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 // --- CONFIGURAÇÃO VERTEX AI ---
 const PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
 const LOCATION = process.env.GCLOUD_LOCATION || 'us-central1';
-// O modelo 004 é mais recente e melhor, gera vetores de 768 dimensões
 const MODEL_ID = 'text-embedding-004'; 
 
 if (!SUPABASE_URL || !SUPABASE_KEY || !process.env.GCLOUD_SERVICE_KEY) {
@@ -26,7 +25,7 @@ if (!SUPABASE_URL || !SUPABASE_KEY || !process.env.GCLOUD_SERVICE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Configuração da Autenticação Google
+// Autenticação Google
 const auth = new GoogleAuth({
   credentials: JSON.parse(process.env.GCLOUD_SERVICE_KEY),
   scopes: 'https://www.googleapis.com/auth/cloud-platform'
@@ -34,24 +33,81 @@ const auth = new GoogleAuth({
 
 const mcpServer = new McpServer({
   name: "MCP Supabase Vertex AI",
-  version: "4.0.0"
+  version: "4.1.0"
 });
 
-// Função auxiliar para chamar a API REST do Vertex AI
+// Função auxiliar para Vertex AI
 async function getVertexEmbedding(text) {
   const client = await auth.getClient();
   const url = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${MODEL_ID}:predict`;
   
-  const data = {
-    instances: [{ content: text }]
-  };
-
+  const data = { instances: [{ content: text }] };
   const res = await client.request({ url, method: 'POST', data });
-  // O Vertex AI retorna: { predictions: [ { embeddings: { values: [...] } } ] }
   return res.data.predictions[0].embeddings.values;
 }
 
-// --- TOOL ---
+// --- ROTA DE MANUTENÇÃO (PARA RODAR NA VPS) ---
+// Acessa isto pelo navegador para forçar a criação dos vetores
+app.get('/manutencao/popular-vetores', async (req, res) => {
+  res.write(`
+    <html>
+      <body style="background:#1e1e1e; color:#00ff00; font-family:monospace; padding:20px;">
+      <h1>🛠️ Iniciando Manutenção de Vetores...</h1>
+      <p>Verifique os logs do Easypanel para acompanhar o progresso detalhado.</p>
+      <pre>
+  `);
+
+  try {
+    // 1. Buscar itens SEM embedding
+    const { data: itens, error } = await supabase
+      .from('arsenal_vendas')
+      .select('id, conteudo_texto, nome_arquivo')
+      .is('embedding', null);
+
+    if (error) throw error;
+
+    if (!itens || itens.length === 0) {
+      res.write(`✅ Nenhum item pendente. Tudo atualizado!\n`);
+      res.end('</pre></body></html>');
+      return;
+    }
+
+    res.write(`📦 Encontrados ${itens.length} itens pendentes. Processando em background...\n`);
+
+    // Processamento Assíncrono (para não travar o navegador)
+    (async () => {
+      console.log("🔄 INICIANDO POPULAÇÃO DE VETORES...");
+      for (const [index, item] of itens.entries()) {
+        if (!item.conteudo_texto) continue;
+        
+        try {
+          console.log(`Processing [${index+1}/${itens.length}]: ${item.nome_arquivo}`);
+          const vetor = await getVertexEmbedding(item.conteudo_texto);
+          
+          await supabase
+            .from('arsenal_vendas')
+            .update({ embedding: vetor })
+            .eq('id', item.id);
+            
+        } catch (err) {
+          console.error(`❌ Erro no item ${item.id}:`, err.message);
+        }
+        // Pequena pausa para respeitar limites da API
+        await new Promise(r => setTimeout(r, 200));
+      }
+      console.log("🏁 POPULAÇÃO CONCLUÍDA!");
+    })();
+
+  } catch (err) {
+    res.write(`❌ Erro Critico: ${err.message}\n`);
+    console.error(err);
+  }
+
+  res.write(`🚀 O processo continua rodando no servidor. Pode fechar esta janela.\n`);
+  res.end('</pre></body></html>');
+});
+
+// --- TOOL MCP ---
 mcpServer.tool(
   "buscar_arsenal",
   "Busca inteligente (semântica) no arsenal de vendas usando Google Vertex AI.",
@@ -60,15 +116,9 @@ mcpServer.tool(
     limit: z.number().optional().default(5)
   },
   async ({ query, limit }) => {
-    console.log(`🧠 (Vertex AI) Gerando embedding para: "${query}"`);
-    
+    console.log(`🧠 (Vertex AI) Buscando: "${query}"`);
     try {
-      // 1. Gerar Embedding
       const vetor = await getVertexEmbedding(query);
-
-      // 2. Consultar Supabase (RPC)
-      // Nota: Certifica-te que a coluna no Supabase é vector(768)
-      console.log("🔍 Consultando Supabase...");
       const { data, error } = await supabase.rpc('buscar_arsenal_vetorial', {
         query_embedding: vetor,
         match_threshold: 0.5,
@@ -77,10 +127,9 @@ mcpServer.tool(
 
       if (error) throw error;
       
-      // 3. Backup Textual
       let resultados = data;
       if (!resultados || resultados.length === 0) {
-        console.log("⚠️ Busca vetorial vazia. Usando backup textual...");
+        console.log("⚠️ Vetorial vazio. Usando backup textual.");
         const { data: textData } = await supabase
           .from('arsenal_vendas')
           .select('*')
@@ -89,7 +138,6 @@ mcpServer.tool(
         resultados = textData || [];
       }
 
-      // 4. Formatar
       const texto = resultados && resultados.length > 0 
         ? resultados.map(i => `
 ---
@@ -101,10 +149,9 @@ mcpServer.tool(
         : "Nenhum resultado encontrado.";
 
       return { content: [{ type: "text", text: texto }] };
-
     } catch (err) {
       console.error(`❌ Erro: ${err.message}`);
-      return { isError: true, content: [{ type: "text", text: `Erro técnico: ${err.message}` }] };
+      return { isError: true, content: [{ type: "text", text: `Erro: ${err.message}` }] };
     }
   }
 );
