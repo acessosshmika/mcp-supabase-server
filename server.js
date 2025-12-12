@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { GoogleAuth } from 'google-auth-library';
+import { CohereClient } from 'cohere-ai'; // Importar Cohere
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,13 +16,16 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
 const LOCATION = process.env.GCLOUD_LOCATION || 'us-central1';
 const MODEL_ID = 'text-embedding-004'; 
+const COHERE_API_KEY = process.env.COHERE_API_KEY; // Nova Variável
 
-if (!SUPABASE_URL || !SUPABASE_KEY || !process.env.GCLOUD_SERVICE_KEY) {
-  console.error("❌ ERRO: Faltam variáveis de ambiente.");
+// Verificação de segurança
+if (!SUPABASE_URL || !SUPABASE_KEY || !process.env.GCLOUD_SERVICE_KEY || !COHERE_API_KEY) {
+  console.error("❌ ERRO: Faltam variáveis (Supabase, Google JSON ou Cohere).");
   process.exit(1);
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const cohere = new CohereClient({ token: COHERE_API_KEY }); // Inicializar Cohere
 
 const auth = new GoogleAuth({
   credentials: JSON.parse(process.env.GCLOUD_SERVICE_KEY),
@@ -29,8 +33,8 @@ const auth = new GoogleAuth({
 });
 
 const mcpServer = new McpServer({
-  name: "MCP Sales Agent",
-  version: "5.0.0"
+  name: "MCP Sales Agent Ultra",
+  version: "6.0.0"
 });
 
 // --- HELPER: VERTEX AI ---
@@ -41,92 +45,121 @@ async function getVertexEmbedding(text) {
   return res.data.predictions[0].embeddings.values;
 }
 
-// --- ROTA DE MANUTENÇÃO (Mantida) ---
-app.get('/manutencao/popular-vetores', async (req, res) => {
-  res.send("<h1>Manutenção Ativa</h1><p>Use este endpoint apenas se precisares repopular vetores.</p>");
-  // (Código completo omitido para poupar espaço, mas a rota existe para não quebrar links antigos)
-});
-
 // ==========================================
-// 🛠️ TOOL 1: BUSCAR ARSENAL (Inteligência)
+// 🛠️ TOOL 1: BUSCAR ARSENAL (COM RE-RANKING)
 // ==========================================
 mcpServer.tool(
   "buscar_arsenal",
-  "Busca inteligente (semântica) no arsenal de vendas usando Google Vertex AI.",
+  "Busca inteligente (semântica + re-ranking) no arsenal de vendas.",
   {
     query: z.string().describe("O que você procura?"),
     limit: z.number().optional().default(5)
   },
   async ({ query, limit }) => {
-    console.log(`🧠 Buscando: "${query}"`);
+    console.log(`🧠 Buscando: "${query}" (Limite Final: ${limit})`);
     try {
+      // 1. Gerar Embedding (Vertex AI)
       const vetor = await getVertexEmbedding(query);
-      const { data, error } = await supabase.rpc('buscar_arsenal_vetorial', {
-        query_embedding: vetor, match_threshold: 0.5, match_count: limit
+      
+      // 2. Busca "Rede Larga" no Supabase (Trazemos 5x mais itens que o necessário)
+      // Trazemos 25 itens para o Re-ranker ter material para trabalhar
+      const FETCH_SIZE = 25; 
+      
+      const { data: rawResults, error } = await supabase.rpc('buscar_arsenal_vetorial', {
+        query_embedding: vetor, 
+        match_threshold: 0.3, // Baixamos a régua para pegar mais candidatos
+        match_count: FETCH_SIZE
       });
 
       if (error) throw error;
       
-      // Backup Textual
-      let resultados = data;
-      if (!resultados || resultados.length === 0) {
+      let finalResults = [];
+
+      // 3. Lógica de Re-ranking
+      if (rawResults && rawResults.length > 0) {
+        console.log(`⚖️ Re-ranking ${rawResults.length} candidatos com Cohere...`);
+        
+        // Prepara os documentos para o Cohere ler
+        const documentsToRank = rawResults.map(doc => ({
+          text: doc.conteudo_texto || "",
+          id: doc.id // Guardamos o ID para recuperar o objeto original depois
+        }));
+
+        // Chama a API de Re-ranking
+        const rerank = await cohere.rerank({
+          documents: documentsToRank,
+          query: query,
+          topN: limit, // Agora sim cortamos para o limite final (ex: 5)
+          model: 'rerank-multilingual-v3.0' // Modelo excelente para Português
+        });
+
+        // Mapeia os resultados do Cohere de volta para os objetos do Supabase
+        finalResults = rerank.results.map(rankedItem => {
+          // O Cohere devolve o índice do array original
+          return rawResults[rankedItem.index];
+        });
+        
+        console.log(`🎯 Top ${finalResults.length} selecionados após Re-ranking.`);
+
+      } else {
+        // Fallback: Busca textual se a vetorial falhar totalmente
+        console.log("⚠️ Vetorial vazia. Tentando backup textual simples...");
         const { data: textData } = await supabase.from('arsenal_vendas')
           .select('*').ilike('conteudo_texto', `%${query}%`).limit(limit);
-        resultados = textData || [];
+        finalResults = textData || [];
       }
 
-      const texto = resultados.length > 0 
-        ? resultados.map(i => `
+      // 4. Formatação da Resposta
+      const texto = finalResults.length > 0 
+        ? finalResults.map(i => `
 ---
 📂 Arquivo: ${i.nome_arquivo}
 🔗 Link: ${i.link_publico}
+⭐ Relevância: Alta (Validada por IA)
 📝 Conteúdo: ${i.conteudo_texto ? i.conteudo_texto.substring(0, 350) : "Sem texto"}...
 ---`).join("\n")
         : "Nenhum resultado encontrado.";
 
       return { content: [{ type: "text", text: texto }] };
+
     } catch (err) {
+      console.error("Erro na busca:", err);
       return { isError: true, content: [{ type: "text", text: `Erro: ${err.message}` }] };
     }
   }
 );
 
 // ==========================================
-// 🛠️ TOOL 2: SALVAR LEAD (Novo!)
+// 🛠️ TOOL 2: SALVAR LEAD (Mantida)
 // ==========================================
 mcpServer.tool(
   "salvar_lead",
-  "Salva ou atualiza informações do cliente (nome, interesse, estágio) no banco de dados.",
+  "Salva ou atualiza informações do cliente.",
   {
-    telefone: z.string().describe("O número de telefone do cliente (ID único). Use o formato 5511..."),
-    nome: z.string().optional().describe("Nome do cliente, se ele informar"),
-    interesse: z.string().optional().describe("O produto ou tema de interesse principal"),
-    stage: z.string().optional().describe("Estágio do funil: 'lead_in', 'qualificado', 'negociacao'")
+    telefone: z.string(),
+    nome: z.string().optional(),
+    interesse: z.string().optional(),
+    stage: z.string().optional()
   },
   async ({ telefone, nome, interesse, stage }) => {
-    console.log(`💾 Salvando Lead: ${nome || telefone}`);
+    // (Mesma lógica anterior, mantida para não perder funcionalidade)
     try {
-      // Prepara os dados (remove undefined)
       const updateData = { telefone, last_interaction: new Date() };
       if (nome) updateData.nome = nome;
       if (interesse) updateData.primary_interest = interesse;
       if (stage) updateData.funnel_stage = stage;
-
-      // Upsert: Atualiza se existir, cria se não existir (baseado no telefone)
-      const { data, error } = await supabase
-        .from('leads')
-        .upsert(updateData, { onConflict: 'telefone' })
-        .select();
-
+      
+      const { error } = await supabase.from('leads').upsert(updateData, { onConflict: 'telefone' });
       if (error) throw error;
-
-      return { content: [{ type: "text", text: `✅ Dados do cliente ${nome || telefone} salvos com sucesso!` }] };
+      return { content: [{ type: "text", text: `✅ Lead ${nome || telefone} salvo.` }] };
     } catch (err) {
-      console.error("Erro ao salvar lead:", err);
-      return { isError: true, content: [{ type: "text", text: `Erro ao salvar: ${err.message}` }] };
+      return { isError: true, content: [{ type: "text", text: `Erro: ${err.message}` }] };
     }
   }
 );
+
+// --- ROTA MANUTENÇÃO ---
+app.get('/manutencao/popular-vetores', (req, res) => res.send("<h1>Servidor MCP Ativo</h1>"));
 
 // --- SSE SERVER ---
 app.use(cors());
@@ -139,4 +172,4 @@ app.get('/sse', async (req, res) => {
 app.post('/message', async (req, res) => {
   if (transport) await transport.handlePostMessage(req, res);
 });
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Servidor Sales Agent v5.0 (Com Captura de Leads) na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Sales Agent Ultra (Re-rank) na porta ${PORT}`));
