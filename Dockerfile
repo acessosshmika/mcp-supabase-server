@@ -1,11 +1,11 @@
-# Usa uma imagem leve do Node
-FROM node:18-alpine
+# Usa uma imagem leve do Node.js
+FROM node:20-alpine
 
-# Cria a pasta de trabalho
+# Define o diretório de trabalho
 WORKDIR /app
 
-# Copia os ficheiros de dependências
-COPY package*.json ./
+# Copia os arquivos de dependência primeiro (para aproveitar o cache)
+COPY package.json ./
 
 # Instala as dependências
 RUN npm install
@@ -16,5 +16,5 @@ COPY . .
 # Expõe a porta 3000
 EXPOSE 3000
 
-# Inicia o servidor explicitamente
-CMD ["node", "server.js"]
+# Comando para iniciar
+CMD ["npm", "start"]
